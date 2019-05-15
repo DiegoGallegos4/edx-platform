@@ -433,17 +433,6 @@ class CourseAuthorization(models.Model):
     # Whether or not to enable instructor email
     email_enabled = models.BooleanField(default=False)
 
-    @classmethod
-    def instructor_email_enabled(cls, course_id):
-        """
-        Returns whether or not email is enabled for the given course id.
-        """
-        try:
-            record = cls.objects.get(course_id=course_id)
-            return record.email_enabled
-        except cls.DoesNotExist:
-            return False
-
     def __unicode__(self):
         not_en = "Not "
         if self.email_enabled:
@@ -474,28 +463,6 @@ class BulkEmailFlag(ConfigurationModel):
     """
     # boolean field 'enabled' inherited from parent ConfigurationModel
     require_course_email_auth = models.BooleanField(default=True)
-
-    @classmethod
-    def feature_enabled(cls, course_id=None):
-        """
-        Looks at the currently active configuration model to determine whether the bulk email feature is available.
-
-        If the flag is not enabled, the feature is not available.
-        If the flag is enabled, course-specific authorization is required, and the course_id is either not provided
-            or not authorixed, the feature is not available.
-        If the flag is enabled, course-specific authorization is required, and the provided course_id is authorized,
-            the feature is available.
-        If the flag is enabled and course-specific authorization is not required, the feature is available.
-        """
-        if not BulkEmailFlag.is_enabled():
-            return False
-        elif BulkEmailFlag.current().require_course_email_auth:
-            if course_id is None:
-                return False
-            else:
-                return CourseAuthorization.instructor_email_enabled(course_id)
-        else:  # implies enabled == True and require_course_email == False, so email is globally enabled
-            return True
 
     class Meta(object):
         app_label = "bulk_email"
