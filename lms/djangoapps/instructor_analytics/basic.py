@@ -31,6 +31,8 @@ from shoppingcart.models import (
     RegistrationCodeRedemption
 )
 from student.models import CourseEnrollment, CourseEnrollmentAllowed
+from opaque_keys.edx.keys import CourseKey
+
 
 STUDENT_FEATURES = ('id', 'username', 'first_name', 'last_name', 'is_staff', 'email')
 PROFILE_FEATURES = ('name', 'language', 'location', 'year_of_birth', 'gender',
@@ -348,10 +350,19 @@ def get_proctored_exam_results(course_key, features):
                 u'{status} Comments'.format(status=status): '; '.join(comment_list),
             })
 
+        proctored_exam['track'] = get_course_mode(exam_attempt['user_id'], exam_attempt['course_id'])
         return proctored_exam
 
     exam_attempts = get_exam_violation_report(course_key)
     return [extract_details(exam_attempt, features) for exam_attempt in exam_attempts]
+
+def get_course_mode(pstudent_id, pcourse_id):
+    course_key = CourseKey.from_string(pcourse_id)
+
+    coursemode = CourseEnrollment.objects.filter(user_id=pstudent_id, course_id=course_key)
+    if not coursemode:
+        raise Exception('No enrollment found')
+    return coursemode[0].mode
 
 
 def coupon_codes_features(features, coupons_list, course_id):
