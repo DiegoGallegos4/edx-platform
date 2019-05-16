@@ -353,7 +353,7 @@ def get_proctored_exam_results(course_key, features):
                 u'{status} Comments'.format(status=status): '; '.join(comment_list),
             })
 
-        proctored_exam['track'] = course_enrollment.filter(user_id=exam_attempt['user_id'])[0].mode
+        proctored_exam['track'] = course_enrollment[exam_attempt['user_id']]
         return proctored_exam
 
     exam_attempts = get_exam_violation_report(course_key)
@@ -365,7 +365,11 @@ def get_enrollments_for_course(exam_attempts):
      Returns all enrollments for a given course
      """
     if exam_attempts:
-        enrollments = CourseEnrollment.objects.filter(course_id= CourseKey.from_string(exam_attempts[0]['course_id']))
+        users = []
+        for e in exam_attempts:
+            users.append(e['user_id'])
+        enrollments = {c.user_id: c.mode for c in CourseEnrollment.objects.filter
+        (course_id= CourseKey.from_string(exam_attempts[0]['course_id']), user_id__in=users)}
         return enrollments
 
 def coupon_codes_features(features, coupons_list, course_id):
