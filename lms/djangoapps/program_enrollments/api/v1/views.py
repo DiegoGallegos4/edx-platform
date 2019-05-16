@@ -17,7 +17,11 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import CursorPagination
 from rest_framework.response import Response
 
-from lms.djangoapps.program_enrollments.api.v1.constants import CourseEnrollmentResponseStatuses, MAX_ENROLLMENT_RECORDS
+from lms.djangoapps.program_enrollments.api.v1.constants import (
+    CourseEnrollmentResponseStatuses,
+    MAX_ENROLLMENT_RECORDS,
+    REQUEST_STUDENT_KEY,
+)
 from lms.djangoapps.program_enrollments.api.v1.serializers import (
     ProgramCourseEnrollmentListSerializer,
     ProgramCourseEnrollmentRequestSerializer,
@@ -133,7 +137,7 @@ class ProgramEnrollmentsView(DeveloperErrorViewMixin, PaginatedAPIView):
         * The request body will be a list of one or more students to enroll with the following schema:
             {
                 'status': A choice of the following statuses: ['enrolled', 'pending', 'withdrawn', 'suspended'],
-                'external_user_key': string representation of a learner in partner systems,
+                student_key: string representation of a learner in partner systems,
                 'curriculum_uuid': string representation of a curriculum
             }
         Example:
@@ -191,6 +195,70 @@ class ProgramEnrollmentsView(DeveloperErrorViewMixin, PaginatedAPIView):
       * 404: NOT FOUND - The requested program does not exist.
       * 413: PAYLOAD TOO LARGE - Over 25 students supplied
       * 422: Unprocesable Entity - None of the students were successfully listed.
+
+    Update
+    ==========
+    Path: `/api/program_enrollments/v1/programs/{program_uuid}/enrollments/`
+    Where the program_uuid will be the uuid for a program.
+
+    Request body:
+        * The request body will be a list of one or more students with their updated enrollment status:
+            {
+                'status': A choice of the following statuses: ['enrolled', 'pending', 'withdrawn', 'suspended'],
+                student_key: string representation of a learner in partner systems
+            }
+        Example:
+            [
+                {
+                    "status": "enrolled",
+                    "external_user_key": "123",
+                },{
+                    "status": "withdrawn",
+                    "external_user_key": "456",
+                },{
+                    "status": "pending",
+                    "external_user_key": "789",
+                },{
+                    "status": "suspended",
+                    "external_user_key": "abc",
+                },
+            ]
+
+    Returns:
+      * Response Body: {<external_user_key>: <status>} with as many keys as there were in the request body
+        * external_user_key - string representation of a learner in partner systems
+        * status - the learner's registration status
+            * success statuses:
+                * 'enrolled'
+                * 'pending'
+                * 'withdrawn'
+                * 'suspended'
+            * failure statuses:
+                * 'duplicated' - the request body listed the same learner twice
+                * 'conflict' - there is an existing enrollment for that learner, curriculum and program combo
+                * 'invalid-status' - a status other than 'enrolled', 'pending', 'withdrawn', 'suspended' was entered
+                * 'not-in-program' - the user is not in the program and cannot be updated
+      * 201: CREATED - All students were successfully enrolled.
+        * Example json response:
+            {
+                '123': 'enrolled',
+                '456': 'pending',
+                '789': 'withdrawn,
+                'abc': 'suspended'
+            }
+      * 207: MULTI-STATUS - Some students were successfully enrolled while others were not.
+      Details are included in the JSON response data.
+        * Example json response:
+            {
+                '123': 'duplicated',
+                '456': 'not-in-program',
+                '789': 'invalid-status,
+                'abc': 'suspended'
+            }
+      * 403: FORBIDDEN - The requesting user lacks access to enroll students in the given program.
+      * 404: NOT FOUND - The requested program does not exist.
+      * 413: PAYLOAD TOO LARGE - Over 25 students supplied
+      * 422: Unprocesable Entity - None of the students were successfully updated.
     """
     authentication_classes = (
         JwtAuthentication,
@@ -213,38 +281,20 @@ class ProgramEnrollmentsView(DeveloperErrorViewMixin, PaginatedAPIView):
     @verify_program_exists
     def post(self, request, *args, **kwargs):
         """
-        This is the POST for ProgramEnrollments
+        Create program enrollments for a list of learners
         """
-        if len(request.data) > 25:
+        if len(request.data) > MAX_ENROLLMENT_RECORDS:
             return Response(
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 content_type='application/json',
             )
 
         program_uuid = kwargs['program_uuid']
-        student_data = OrderedDict((
-            row.get('external_user_key'),
-            {
-                'program_uuid': program_uuid,
-                'curriculum_uuid': row.get('curriculum_uuid'),
-                'status': row.get('status'),
-                'external_user_key': row.get('external_user_key'),
-            })
-            for row in request.data
-        )
-
-        key_counter = Counter([enrollment.get('external_user_key') for enrollment in request.data])
+        student_data = self._request_data_by_student_key(request, program_uuid)
 
         response_data = {}
-        for student_key, count in key_counter.items():
-            if count > 1:
-                response_data[student_key] = CourseEnrollmentResponseStatuses.DUPLICATED
-                student_data.pop(student_key)
-
-        existing_enrollments = ProgramEnrollment.bulk_read_by_student_key(program_uuid, student_data)
-        for enrollment in existing_enrollments:
-            response_data[enrollment.external_user_key] = CourseEnrollmentResponseStatuses.CONFLICT
-            student_data.pop(enrollment.external_user_key)
+        response_data.update(self._remove_duplicate_entries(request, student_data))
+        response_data.update(self._remove_existing_entries(program_uuid, student_data))
 
         enrollments_to_create = {}
 
@@ -268,27 +318,106 @@ class ProgramEnrollmentsView(DeveloperErrorViewMixin, PaginatedAPIView):
                         status.HTTP_422_UNPROCESSABLE_ENTITY
                     )
 
-        for enrollment_serializer in enrollments_to_create.values():
-            # create the model
+        # TODO: make this a bulk save - https://openedx.atlassian.net/browse/EDUCATOR-4305
+        for (student_key, _), enrollment_serializer in enrollments_to_create.items():
             enrollment_serializer.save()
-            # TODO: make this a bulk save
 
-        if not enrollments_to_create:
+        return self._get_created_or_updated_response(request, enrollments_to_create, response_data)
+
+    @verify_program_exists
+    def patch(self, request, **kwargs):
+        """
+        Modify the program enrollments for a list of learners
+        """
+        if len(request.data) > MAX_ENROLLMENT_RECORDS:
             return Response(
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                data=response_data,
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 content_type='application/json',
             )
 
-        if len(request.data) != len(enrollments_to_create):
-            return Response(
-                status=status.HTTP_207_MULTI_STATUS,
-                data=response_data,
-                content_type='application/json',
-            )
+        program_uuid = kwargs['program_uuid']
+        student_data = self._request_data_by_student_key(request, program_uuid)
+
+        response_data = {}
+        response_data.update(self._remove_duplicate_entries(request, student_data))
+
+        existing_enrollments = {
+            enrollment.external_user_key: enrollment
+            for enrollment in
+            ProgramEnrollment.bulk_read_by_student_key(program_uuid, student_data)
+        }
+
+        enrollments_to_create = {}
+
+        for external_user_key in student_data.keys():
+            if external_user_key not in existing_enrollments:
+                student_data.pop(external_user_key)
+                response_data[external_user_key] = CourseEnrollmentResponseStatuses.NOT_IN_PROGRAM
+
+        for external_user_key, enrollment in existing_enrollments.items():
+            student = {key: value for key, value in student_data[external_user_key].items() if key == 'status'}
+            enrollment_serializer = ProgramEnrollmentSerializer(enrollment, data=student, partial=True)
+            if enrollment_serializer.is_valid():
+                enrollments_to_create[(external_user_key, enrollment.curriculum_uuid)] = enrollment_serializer
+                enrollment_serializer.save()
+                response_data[external_user_key] = student['status']
+            else:
+                serializer_is_invalid = enrollment_serializer.errors['status'][0].code == 'invalid_choice'
+                if 'status' in enrollment_serializer.errors and serializer_is_invalid:
+                    response_data[external_user_key] = CourseEnrollmentResponseStatuses.INVALID_STATUS
+
+        return self._get_created_or_updated_response(request, enrollments_to_create, response_data, status.HTTP_200_OK)
+
+    def _remove_duplicate_entries(self, request, student_data):
+        """ Helper method to remove duplicate entries (based on student key) from request data. """
+        result = {}
+        key_counter = Counter([enrollment.get(REQUEST_STUDENT_KEY) for enrollment in request.data])
+        for student_key, count in key_counter.items():
+            if count > 1:
+                result[student_key] = CourseEnrollmentResponseStatuses.DUPLICATED
+                student_data.pop(student_key)
+        return result
+
+    def _request_data_by_student_key(self, request, program_uuid):
+        """
+        Helper method that returns an OrderedDict of rows from request.data,
+        keyed by the `external_user_key`.
+        """
+        return OrderedDict((
+            row.get(REQUEST_STUDENT_KEY),
+            {
+                'program_uuid': program_uuid,
+                'curriculum_uuid': row.get('curriculum_uuid'),
+                'status': row.get('status'),
+                'external_user_key': row.get(REQUEST_STUDENT_KEY),
+            })
+            for row in request.data
+        )
+
+    def _remove_existing_entries(self, program_uuid, student_data):
+        """ Helper method to remove entries that have existing ProgramEnrollment records. """
+        result = {}
+        existing_enrollments = ProgramEnrollment.bulk_read_by_student_key(program_uuid, student_data)
+        for enrollment in existing_enrollments:
+            result[enrollment.external_user_key] = CourseEnrollmentResponseStatuses.CONFLICT
+            student_data.pop(enrollment.external_user_key)
+        return result
+
+    def _get_created_or_updated_response(
+            self, request, created_or_updated_data, response_data, default_status=status.HTTP_201_CREATED
+    ):
+        """
+        Helper method to determine an appropirate HTTP response status code.
+        """
+        response_status = default_status
+
+        if not created_or_updated_data:
+            response_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+        elif len(request.data) != len(created_or_updated_data):
+            response_status = status.HTTP_207_MULTI_STATUS
 
         return Response(
-            status=status.HTTP_201_CREATED,
+            status=response_status,
             data=response_data,
             content_type='application/json',
         )
@@ -449,6 +578,28 @@ class ProgramCourseEnrollmentsView(DeveloperErrorViewMixin, ProgramCourseRunSpec
         """
         Enroll a list of students in a course in a program
         """
+        return self.create_or_modify_enrollments(
+            request,
+            program_uuid,
+            self.enroll_learner_in_course
+        )
+
+    # pylint: disable=unused-argument
+    def patch(self, request, program_uuid=None, course_id=None):
+        """
+        Modify the program course enrollments of a list of learners
+        """
+        return self.create_or_modify_enrollments(
+            request,
+            program_uuid,
+            self.modify_learner_enrollment_status
+        )
+
+    def create_or_modify_enrollments(self, request, program_uuid, operation):
+        """
+        Process a list of program course enrollment request objects
+        and create or modify enrollments based on method
+        """
         self.check_course_existence_and_membership()
         results = {}
         seen_student_keys = set()
@@ -480,7 +631,13 @@ class ProgramCourseEnrollmentsView(DeveloperErrorViewMixin, ProgramCourseRunSpec
             student_key = enrollment["student_key"]
             if student_key in results and results[student_key] == CourseEnrollmentResponseStatuses.DUPLICATED:
                 continue
-            results[student_key] = self.enroll_learner_in_course(enrollment, program_enrollments)
+            try:
+                program_enrollment = program_enrollments[student_key]
+            except KeyError:
+                results[student_key] = CourseEnrollmentResponseStatuses.NOT_IN_PROGRAM
+            else:
+                program_course_enrollment = program_enrollment.get_program_course_enrollment(self.course_key)
+                results[student_key] = operation(enrollment, program_enrollment, program_course_enrollment)
 
         good_count = sum(1 for _, v in results.items() if v not in CourseEnrollmentResponseStatuses.ERROR_STATUSES)
         if not good_count:
@@ -523,24 +680,27 @@ class ProgramCourseEnrollmentsView(DeveloperErrorViewMixin, ProgramCourseRunSpec
         existing_enrollments = existing_enrollments.prefetch_related('program_course_enrollments')
         return {enrollment.external_user_key: enrollment for enrollment in existing_enrollments}
 
-    def enroll_learner_in_course(self, enrollment_request, program_enrollments):
+    def enroll_learner_in_course(self, enrollment_request, program_enrollment, program_course_enrollment):
         """
         Attempts to enroll the specified user into the course as a part of the
          given program enrollment with the given status
 
         Returns the actual status
         """
-        student_key = enrollment_request['student_key']
-        try:
-            program_enrollment = program_enrollments[student_key]
-        except KeyError:
-            return CourseEnrollmentResponseStatuses.NOT_IN_PROGRAM
-        if program_enrollment.get_program_course_enrollment(self.course_key):
+        if program_course_enrollment:
             return CourseEnrollmentResponseStatuses.CONFLICT
-
-        enrollment_status = ProgramCourseEnrollment.enroll(
+        return ProgramCourseEnrollment.enroll(
             program_enrollment,
             self.course_key,
             enrollment_request['status']
         )
-        return enrollment_status
+
+    # pylint: disable=unused-argument
+    def modify_learner_enrollment_status(self, enrollment_request, program_enrollment, program_course_enrollment):
+        """
+        Attempts to modify the specified user's enrollment in the given course
+        in the given program
+        """
+        if program_course_enrollment is None:
+            return CourseEnrollmentResponseStatuses.NOT_FOUND
+        return program_course_enrollment.change_status(enrollment_request['status'])

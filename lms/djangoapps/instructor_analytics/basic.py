@@ -332,7 +332,7 @@ def get_proctored_exam_results(course_key, features):
     """
     comment_statuses = ['Rules Violation', 'Suspicious']
 
-    def extract_details(exam_attempt, features):
+    def extract_details(exam_attempt, features, course_enrollment):
         """
         Build dict containing information about a single student exam_attempt.
         """
@@ -350,23 +350,20 @@ def get_proctored_exam_results(course_key, features):
                 u'{status} Comments'.format(status=status): '; '.join(comment_list),
             })
 
-        proctored_exam['track'] = get_course_mode(exam_attempt['user_id'], exam_attempt['course_id'])
+        proctored_exam['track'] = course_enrollment.filter(user_id=exam_attempt['user_id'])[0].mode
         return proctored_exam
 
     exam_attempts = get_exam_violation_report(course_key)
-    return [extract_details(exam_attempt, features) for exam_attempt in exam_attempts]
+    course_enrollment = get_enrollments_for_course(exam_attempts)
+    return [extract_details(exam_attempt, features, course_enrollment) for exam_attempt in exam_attempts]
 
-def get_course_mode(pstudent_id, pcourse_id):
+def get_enrollments_for_course(exam_attempts):
     """
-     Returns course mode for a course/student
+     Returns all enrollments for a given course
      """
-    course_key = CourseKey.from_string(pcourse_id)
-
-    coursemode = CourseEnrollment.objects.filter(user_id=pstudent_id, course_id=course_key)
-    if not coursemode:
-        raise Exception('No enrollment found')
-    return coursemode[0].mode
-
+    if exam_attempts:
+        enrollments = CourseEnrollment.objects.filter(course_id= CourseKey.from_string(exam_attempts[0]['course_id']))
+        return enrollments
 
 def coupon_codes_features(features, coupons_list, course_id):
     """

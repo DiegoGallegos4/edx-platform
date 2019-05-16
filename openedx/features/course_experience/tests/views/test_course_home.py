@@ -217,7 +217,7 @@ class TestCourseHomePage(CourseHomePageTestCase):
 
         # Fetch the view and verify the query counts
         # TODO: decrease query count as part of REVO-28
-        with self.assertNumQueries(91, table_blacklist=QUERY_COUNT_TABLE_BLACKLIST):
+        with self.assertNumQueries(94, table_blacklist=QUERY_COUNT_TABLE_BLACKLIST):
             with check_mongo_calls(4):
                 url = course_home_url(self.course)
                 self.client.get(url)
@@ -411,17 +411,37 @@ class TestCourseHomePageAccess(CourseHomePageTestCase):
         self.assertRedirects(response, expected_url)
 
     @override_waffle_flag(FIRST_PURCHASE_OFFER_BANNER_DISPLAY, active=True)
-    def test_first_purchase_offer_banner(self):
+    @mock.patch('openedx.features.course_experience.utils.discount_percentage')
+    @mock.patch('openedx.features.course_experience.utils.can_receive_discount')
+    @ddt.data(
+        [True, 15],
+        [True, 13],
+        [True, 0],
+        [False, 15])
+    @ddt.unpack
+    def test_first_purchase_offer_banner_display(self,
+                                                 applicability,
+                                                 percentage,
+                                                 can_receive_discount_mock,
+                                                 discount_percentage_mock):
         """
         Ensure first purchase offer banner displays correctly
         """
+        can_receive_discount_mock.return_value = applicability
+        discount_percentage_mock.return_value = percentage
         user = self.create_user_for_course(self.course, CourseUserType.ENROLLED)
         self.client.login(username=user.username, password=self.TEST_PASSWORD)
         url = course_home_url(self.course)
         response = self.client.get(url)
-        bannerText = u'''<div class="first-purchase-offer-banner"><span class="first-purchase-offer-banner-bold">
-                     15% off your first upgrade.</span> Discount automatically applied.</div>'''
-        self.assertContains(response, bannerText, html=True)
+        bannerText = u'''<div class="first-purchase-offer-banner">
+                     <span class="first-purchase-offer-banner-bold">
+                     {}% off your first upgrade.
+                     </span> Discount automatically applied.
+                     </div>'''.format(percentage)
+        if applicability:
+            self.assertContains(response, bannerText, html=True)
+        else:
+            self.assertNotContains(response, bannerText, html=True)
 
     @mock.patch.dict(settings.FEATURES, {'DISABLE_START_DATES': False})
     def test_course_does_not_expire_for_verified_user(self):
