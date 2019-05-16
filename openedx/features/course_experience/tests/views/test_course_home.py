@@ -53,6 +53,7 @@ from openedx.features.course_experience import (
     SHOW_UPGRADE_MSG_ON_COURSE_HOME,
     UNIFIED_COURSE_TAB_FLAG
 )
+from openedx.features.discounts.applicability import DISCOUNT_APPLICABILITY_FLAG
 from student.models import CourseEnrollment
 from student.tests.factories import UserFactory
 from util.date_utils import strftime_localized
@@ -442,6 +443,36 @@ class TestCourseHomePageAccess(CourseHomePageTestCase):
             self.assertContains(response, bannerText, html=True)
         else:
             self.assertNotContains(response, bannerText, html=True)
+
+    @override_waffle_flag(FIRST_PURCHASE_OFFER_BANNER_DISPLAY, active=True)
+    @override_waffle_flag(DISCOUNT_APPLICABILITY_FLAG, active=True)
+    def test_first_purchase_offer_banner_course_requirements(self):
+        """
+        Ensure first purchase offer banner only displays for courses with a non-expired verified mode
+        """
+        user = self.create_user_for_course(self.course, CourseUserType.ENROLLED)
+        self.client.login(username=user.username, password=self.TEST_PASSWORD)
+        url = course_home_url(self.course)
+        response = self.client.get(url)
+        bannerText = u'''<div class="first-purchase-offer-banner">
+                     <span class="first-purchase-offer-banner-bold">
+                     {}% off your first upgrade.
+                     </span> Discount automatically applied.
+                     </div>'''.format(15)
+        self.assertContains(response, bannerText, html=True)
+
+        no_verified_mode_course = CourseFactory(end=now() + timedelta(days=30))
+        user = self.create_user_for_course(no_verified_mode_course, CourseUserType.ENROLLED)
+        url = course_home_url(no_verified_mode_course)
+        response = self.client.get(url)
+        self.assertNotContains(response, bannerText, html=True)
+
+        course_that_has_ended = CourseFactory(end=now() - timedelta(days=30))
+        add_course_mode(course_that_has_ended, upgrade_deadline_expired=False)
+        user = self.create_user_for_course(course_that_has_ended, CourseUserType.ENROLLED)
+        url = course_home_url(course_that_has_ended)
+        response = self.client.get(url)
+        self.assertNotContains(response, bannerText, html=True)
 
     @mock.patch.dict(settings.FEATURES, {'DISABLE_START_DATES': False})
     def test_course_does_not_expire_for_verified_user(self):

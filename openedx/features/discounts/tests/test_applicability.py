@@ -21,5 +21,5 @@ class TestApplicability(ModuleStoreTestCase):
 
     def test_can_receive_discount(self):
         # Right now, no one should be able to receive the discount
-        applicability = can_receive_discount(user=self.user, course_key_string=self.course.id)
+        applicability = can_receive_discount(user=self.user, course=self.course)
         self.assertEqual(applicability, False)
