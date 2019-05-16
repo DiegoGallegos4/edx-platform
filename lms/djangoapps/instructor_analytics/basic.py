@@ -357,6 +357,9 @@ def get_proctored_exam_results(course_key, features):
     return [extract_details(exam_attempt, features) for exam_attempt in exam_attempts]
 
 def get_course_mode(pstudent_id, pcourse_id):
+    """
+     Returns course mode for a course/student
+     """
     course_key = CourseKey.from_string(pcourse_id)
 
     coursemode = CourseEnrollment.objects.filter(user_id=pstudent_id, course_id=course_key)
